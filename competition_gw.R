@@ -23,8 +23,7 @@ df <- read_csv("training.csv") %>%
 
   select(-id, -recorded_by)
 
-# Change the missing construction_year to NAs so that mice()
-# can impute them later.
+# Change the missing construction_year to NAs so that mice() can impute them later.
 # Use a loop because mutate() will not assign NA values.
 
 new_year <- c()
@@ -49,7 +48,7 @@ filled <- complete(imputed)
 
 # Assign the new values to the original df to keep it as a tibble.
 
-df$construction_year <- as.factor(filled[, "construction_year"])
+df$construction_year <- (filled[, "construction_year"])
 df$permit <- as.logical(filled[, "permit"])
 df$public_meeting <- as.logical(filled[, "public_meeting"])
 
@@ -62,7 +61,7 @@ factors <- c()
 # Cycle through variable names and save only those not in the doubles list.
 
 for (var in names(df)) {
-  if (! var %in% doubles) {
+  if (class(df[[var]]) == "character") {
     factors <- c(factors, var)
   }
 }
@@ -70,12 +69,16 @@ for (var in names(df)) {
 # Change the factor variables to factors.
 
 df <- df %>%
-  mutate_at(.vars = factors, as.factor)
+  mutate_at(.vars = factors, as.factor) %>% 
+  
+# Drop variables with too many levels!
+  
+  select(-ward, -lga)
 
-### Pre-process the data to fill in NAs with median value, ignore some values, scale others, etc.
+### Pre-process the data to ignore some values, scale others, etc.
 # From the caret package.
-pre <- preProcess(df, method = c("center", "scale"))
-df <- predict(pre, df)
+# pre <- preProcess(df, method = c("center", "scale"))
+# df <- predict(pre, df)
 
 # Define the predictors and outcome variable.
 predictors <- df %>%
@@ -84,8 +87,7 @@ predictors <- df %>%
 
 outcome <- "status_group"
 
-# Make the outcome levels usable variable names so that train()
-# can use them.
+# Make the outcome levels usable variable names so that train() can use them.
 
 df <- df %>% 
   mutate(status_group = case_when(
@@ -97,7 +99,7 @@ df <- df %>%
 
 # Split the data into training (80%) and testing data (20%).
 
-partition <- createDataPartition(df$status_group, p = 0.75, list = FALSE)
+partition <- createDataPartition(df$status_group, p = 0.8, list = FALSE)
 
 training <- df[partition, ]
 testing <- df[-partition, ]
@@ -108,16 +110,45 @@ testing <- df[-partition, ]
 
 macro_f1 <- function (y_true, y_pred, positive = NULL) {
   Confusion_DF <- ConfusionDF(y_pred, y_true)
-  if (is.null(positive) == TRUE) 
+  if (is.null(positive) == TRUE)
     positive <- as.character(Confusion_DF[1, 1])
-  
+
   Precision <- Precision(y_true, y_pred, positive)
   Recall <- Recall(y_true, y_pred, positive)
-  
+
   F1_Score <- 2 * (Precision * Recall)/(Precision + Recall)
-  
+
   return(F1_Score)
 }
+
+### Feature selection.
+
+# Reduce the model to a few predictors to improve variance.
+
+model_rf <- randomForest(status_group ~ ., data = training)
+
+# Generate predicted values.
+
+preds <- predict(model_rf, testing[,-38])
+
+# Calculate the macro F1 score.
+
+rf_f1 <- macro_f1(testing$status_group, preds) # F1 is .8426
+
+# 
+
+###################
+
+# Set the feature selection parameters.
+
+selection_parameters <- rfeControl(functions = rfFuncs,
+                      method = "repeatedcv",
+                      repeats = 1,
+                      verbose = TRUE)
+
+# Run the feature selection
+
+# selection_model <- rfe(data.matrix(training[, predictors]), data.matrix(training[, outcome]), rfeControl = selection_parameters)
 
 # Set the training parameters for multiple models.
 # Default method is "boot".
