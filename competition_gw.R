@@ -1,14 +1,13 @@
-# Classification problem (k = 3)
-# functional, needs repair, nonfunctional
-# use KNN, multiclass logistic regression (228), LDA (246), QDA, Naive Bayes
+###############################
+### This files contains the preliminary work that preceded final.R.
+### It divides the training.csv data into training and test folds,
+### while final.R uses a separate test.csv to predict categories.
+###############################
 
 library(tidyverse)
 library(mice)
-library(MLmetrics) # For F1 score.
-library(caret) # Lots of stuff. See https://cran.r-project.org/web/packages/caret/vignettes/caret.html.
-library(caretEnsemble)
-library(AER)
-library(janitor)
+library(MLmetrics)
+library(caret)
 library(randomForest)
 library(FNN)
 library(nnet)
@@ -198,4 +197,55 @@ f1_log <- F1_Score(testing$status_group, preds_log) # F1 is .797
 ### Voting.
 ###############################
 
-voting <- tibble(rf = preds_rf, knn = preds_knn, log = preds_log, vote = NA)
+voting <- tibble(rf = preds_rf, knn = factor(preds_knn), log = preds_log) %>% 
+  mutate(vote = case_when(
+    rf == knn ~ rf,
+    knn == log ~ knn,
+    rf == log ~ rf
+  ))
+
+f1_final <- F1_Score(testing$status_group, voting$vote) # .833
+
+###############################
+### Stacking.
+###############################
+
+# Run another KNN for the training data.
+
+model_knn_stacked <- knn.cv(train, cl, k = 5)
+
+knn_results_stacked <- tibble(model_knn_stacked) %>% 
+  mutate(status_group = case_when(
+    model_knn_stacked == 1 ~ "functional",
+    model_knn_stacked == 2 ~ "nonfunctional",
+    model_knn_stacked == 3 ~ "repair"))
+
+# Calculate training predictions again.
+
+preds_rf_stacked <- predict(model_rf, training[,-38])
+preds_knn_stacked <- knn_results_stacked$status_group
+preds_log_stacked <- predict(model_log, training[,-38])
+
+# Make a new meta-model.
+
+training_ensemble <- tibble(rf = preds_rf_stacked,
+                            knn = factor(preds_knn_stacked),
+                            log = preds_log_stacked,
+                            actual = training[[38]])
+
+# Predict the actual training data based on the three models.
+# Either multinom or rf produce the same result.
+
+# model_stacked <- multinom(actual ~ .,
+#                    data = training_ensemble)
+
+model_stacked <- randomForest(actual ~ .,
+                              data = training_ensemble,
+                              ntree = 100)
+
+
+preds_stacked <- predict(model_stacked, voting[,1:3])
+
+# Calculate the F1 score.
+
+f1_stacked <- F1_Score(preds_stacked, testing$status_group) # .843, the same as the rf model!?
