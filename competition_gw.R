@@ -2,8 +2,6 @@
 # functional, needs repair, nonfunctional
 # use KNN, multiclass logistic regression (228), LDA (246), QDA, Naive Bayes
 
-# Judged by macro F1 score. Use F1_score() from the MLmetrics package.
-
 library(tidyverse)
 library(mice)
 library(MLmetrics) # For F1 score.
@@ -12,17 +10,26 @@ library(caretEnsemble)
 library(AER)
 library(janitor)
 library(randomForest)
+library(FNN)
+library(nnet)
 
 set.seed(242)
 
+###############################
 ### Read in the training data.
+###############################
 
 df <- read_csv("training.csv") %>% 
 
 # Drop id and recorded_by because they provide no predictive information.
 
-  select(-id, -recorded_by)
+  select(-id, -recorded_by) %>% 
 
+# Also drop variables with too many levels.
+# They cause problems for the random forest later on.
+
+  select(-ward, -lga)
+  
 # Change the missing construction_year to NAs so that mice() can impute them later.
 # Use a loop because mutate() will not assign NA values.
 
@@ -39,7 +46,10 @@ for (n in 1:nrow(df)) {
 
 df$construction_year <- new_year
 
-### Imput the missing values in raw with mice.
+###############################
+### Imput the missing values with mice.
+###############################
+
 # See the missing data in permit and public_meeting with md.pattern(raw).
 # Use the default method.
 
@@ -52,13 +62,13 @@ df$construction_year <- (filled[, "construction_year"])
 df$permit <- as.logical(filled[, "permit"])
 df$public_meeting <- as.logical(filled[, "public_meeting"])
 
-### Change most variables to factors.
-# Make a list of the ones to keep as doubles.
+###############################
+### Change character variables to factors.
+###############################
 
-doubles <- c("id", "population", "amount_tsh", "population")
+# Cycle through variable names and save only those that are characters.
+
 factors <- c()
-
-# Cycle through variable names and save only those not in the doubles list.
 
 for (var in names(df)) {
   if (class(df[[var]]) == "character") {
@@ -66,28 +76,32 @@ for (var in names(df)) {
   }
 }
 
-# Change the factor variables to factors.
+# Change the character variables to factors.
 
 df <- df %>%
-  mutate_at(.vars = factors, as.factor) %>% 
-  
-# Drop variables with too many levels!
-  
-  select(-ward, -lga)
+  mutate_at(.vars = factors, as.factor)
 
+###############################
 ### Pre-process the data to ignore some values, scale others, etc.
+###############################
+
 # From the caret package.
 # pre <- preProcess(df, method = c("center", "scale"))
 # df <- predict(pre, df)
 
+###############################
+### Prepare the model.
+###############################
+
 # Define the predictors and outcome variable.
+
 predictors <- df %>%
   select(-status_group) %>%
   names()
 
 outcome <- "status_group"
 
-# Make the outcome levels usable variable names so that train() can use them.
+# Make the outcome level names so that train() can use them.
 
 df <- df %>% 
   mutate(status_group = case_when(
@@ -97,95 +111,91 @@ df <- df %>%
   )) %>% 
   mutate(status_group = as.factor(status_group))
 
-# Split the data into training (80%) and testing data (20%).
+# Split the data into training and testing sets.
 
 partition <- createDataPartition(df$status_group, p = 0.8, list = FALSE)
 
 training <- df[partition, ]
 testing <- df[-partition, ]
 
-### Renamed the F1 function from the MLmetrics F1_Score() function
-# to make sure it works in-code.
-# See MLmetrics:::F1_Score for source code.
+###############################
+### Prediction.
+###############################
 
-macro_f1 <- function (y_true, y_pred, positive = NULL) {
-  Confusion_DF <- ConfusionDF(y_pred, y_true)
-  if (is.null(positive) == TRUE)
-    positive <- as.character(Confusion_DF[1, 1])
+###
+# Run a random forest model.
+###
+# NOTE: With ntree = 500 (default), this takes about 7 minutes to run on my machine.
 
-  Precision <- Precision(y_true, y_pred, positive)
-  Recall <- Recall(y_true, y_pred, positive)
+model_rf <- randomForest(status_group ~ .,
+                         data = training,
+                         ntree = 100)
 
-  F1_Score <- 2 * (Precision * Recall)/(Precision + Recall)
+###
+# Run a KNN model.
+###
+# First use data matrices, since knn.cv() only uses that.
+# Run through k values from 1 through 12 to pick the best model.
 
-  return(F1_Score)
-}
+cl <- data.matrix(training[,38])
+test <- data.matrix(testing[,1:37])
+train <- data.matrix(training[,1:37])
 
-### Feature selection.
+# Uncomment the below code to check which value of k is the best.
+# I find k = 5 produces the highest F1 score.
 
-# Reduce the model to a few predictors to improve variance.
+# scores <- tibble(k = seq(1:13), f1 = NA)
 
-model_rf <- randomForest(status_group ~ ., data = training)
+# for (n in seq(3,13)) {
+#   
+#   model_knn <- knn.cv(train, cl, k = n)
+# 
+#   # Change the numeric results to characters.
+#     
+#   knn_results <- tibble(model_knn) %>% 
+#     mutate(status_group = case_when(
+#       knn_results[1] == 1 ~ "functional",
+#       knn_results[1] == 2 ~ "nonfunctional",
+#       knn_results[1] == 3 ~ "repair"))
+#   
+#   # Save the F1 score.
+#   
+#   scores$f1[n] <- F1_Score(training$status_group, knn_results$status_group)
+# }
+
+# Run the final model with the highest F1 score.
+
+model_knn <- knn(train, test, cl, k = 5)
+
+# Change the numeric results to characters.
+
+knn_results <- tibble(model_knn) %>% 
+  mutate(status_group = case_when(
+    model_knn == 1 ~ "functional",
+    model_knn == 2 ~ "nonfunctional",
+    model_knn == 3 ~ "repair"))
+
+###
+# Run a multinomial logistic regression model.
+###
+
+model_log <- multinom(status_group ~ .,
+                      data = training)
 
 # Generate predicted values.
 
-preds <- predict(model_rf, testing[,-38])
+preds_rf <- predict(model_rf, testing[,-38])
+preds_knn <- knn_results$status_group
+preds_log <- predict(model_log, testing[,-38])
 
-# Calculate the macro F1 score.
+# Calculate the macro F1 score using the MLmetrics package.
 
-rf_f1 <- macro_f1(testing$status_group, preds) # F1 is .8426
+f1_rf <- F1_Score(testing$status_group, preds_rf) # 80% test fold F1 is .843
+f1_knn <- F1_Score(testing$status_group, preds_knn) # F1 is .767
+f1_log <- F1_Score(testing$status_group, preds_log) # F1 is .797
 
-# 
+###############################
+### Voting.
+###############################
 
-###################
-
-# Set the feature selection parameters.
-
-selection_parameters <- rfeControl(functions = rfFuncs,
-                      method = "repeatedcv",
-                      repeats = 1,
-                      verbose = TRUE)
-
-# Run the feature selection
-
-# selection_model <- rfe(data.matrix(training[, predictors]), data.matrix(training[, outcome]), rfeControl = selection_parameters)
-
-# Set the training parameters for multiple models.
-# Default method is "boot".
-# Number of folds or resampling iterations is 10 or 25.
-# savePredictions = "final" only saves the optimal tuning parameters.
-# classProbs = TRUE calculates the class probabilities along with the predicted classification.
-
-parameters <- trainControl(
-  method = "cv", 
-  number = 1,
-  savePredictions = "final",
-  # classProbs = TRUE,
-  verboseIter = TRUE)
-  # summaryFunction = macro_f1
-
-### Random forest model.
-
-testmod <- train(as.factor(training$status_group) ~ .,
-                 data = training,
-                 method = "ranger",
-                 trControl = parameters)
-
-### TEST
-library(e1071)
-nbmod <- naiveBayes(training$status_group ~ ., training)
-
-nb_predict <- predict(nbmod, testing[1:40])
-
-
-#####
-### NOTES
-#####
-
-# Use this to collect all the values with NAs in them to look at them.
-test <- bind_rows(NULL, NULL)
-for (n in 1:nrow(df)) {
-  if (anyNA(df[n, ])) {
-    test <- bind_rows(test, df[n, ])
-  }
-}
+voting <- tibble(rf = preds_rf, knn = preds_knn, log = preds_log, vote = NA)
