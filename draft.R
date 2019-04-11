@@ -22,12 +22,10 @@ df <- read_csv("training.csv") %>%
 
 # Drop id and recorded_by because they provide no predictive information.
 
-  select(-id, -recorded_by) %>% 
+  select(-id, -recorded_by)
 
 # Also drop variables with too many levels.
 # They cause problems for the random forest later on.
-
-  select(-ward, -lga)
   
 # Change the missing construction_year to NAs so that mice() can impute them later.
 # Use a loop because mutate() will not assign NA values.
@@ -126,8 +124,14 @@ testing <- df[-partition, ]
 ###
 # NOTE: With ntree = 500 (default), this takes about 7 minutes to run on my machine.
 
+training_rf <- training %>% 
+  select(-lga)
+
+testing_rf <- testing %>% 
+  select(-lga)
+
 model_rf <- randomForest(status_group ~ .,
-                         data = training,
+                         data = training_rf,
                          ntree = 100)
 
 ###
@@ -136,9 +140,13 @@ model_rf <- randomForest(status_group ~ .,
 # First use data matrices, since knn.cv() only uses that.
 # Run through k values from 1 through 12 to pick the best model.
 
-cl <- data.matrix(training[,38])
-test <- data.matrix(testing[,1:37])
-train <- data.matrix(training[,1:37])
+library(kknn)
+
+cl <- data.matrix(training[,40])
+test <- data.matrix(testing[,1:39])
+train <- data.matrix(training[,1:39])
+
+hi <- kknn(status_group ~ ., training, testing)
 
 # Uncomment the below code to check which value of k is the best.
 # I find k = 5 produces the highest F1 score.
@@ -183,13 +191,13 @@ model_log <- multinom(status_group ~ .,
 
 # Generate predicted values.
 
-preds_rf <- predict(model_rf, testing[,-38])
+preds_rf <- predict(model_rf, testing_rf[,-40])
 preds_knn <- knn_results$status_group
 preds_log <- predict(model_log, testing[,-38])
 
 # Calculate the macro F1 score using the MLmetrics package.
 
-f1_rf <- F1_Score(testing$status_group, preds_rf) # 80% test fold F1 is .843
+f1_rf <- F1_Score(testing_rf$status_group, preds_rf) # 80% test fold F1 is .843
 f1_knn <- F1_Score(testing$status_group, preds_knn) # F1 is .767
 f1_log <- F1_Score(testing$status_group, preds_log) # F1 is .797
 
@@ -197,12 +205,7 @@ f1_log <- F1_Score(testing$status_group, preds_log) # F1 is .797
 ### Voting.
 ###############################
 
-voting <- tibble(rf = preds_rf, knn = factor(preds_knn), log = preds_log) %>% 
-  mutate(vote = case_when(
-    rf == knn ~ rf,
-    knn == log ~ knn,
-    rf == log ~ rf
-  ))
+voting <- tibble(rf = preds_rf, knn = factor(preds_knn), log = preds_log))
 
 f1_final <- F1_Score(testing$status_group, voting$vote) # .833
 
@@ -222,7 +225,7 @@ knn_results_stacked <- tibble(model_knn_stacked) %>%
 
 # Calculate training predictions again.
 
-preds_rf_stacked <- predict(model_rf, training[,-38])
+preds_rf_stacked <- predict(model_rf, training_rf[,-40])
 preds_knn_stacked <- knn_results_stacked$status_group
 preds_log_stacked <- predict(model_log, training[,-38])
 
@@ -236,8 +239,8 @@ training_ensemble <- tibble(rf = preds_rf_stacked,
 # Predict the actual training data based on the three models.
 # Either multinom or rf produce the same result.
 
-# model_stacked <- multinom(actual ~ .,
-#                    data = training_ensemble)
+model_stacked <- multinom(actual ~ .,
+                   data = training_ensemble)
 
 model_stacked <- randomForest(actual ~ .,
                               data = training_ensemble,
